@@ -1,0 +1,23 @@
+2023-08-08 04:15:03,708:root:INFO - Started
+2023-08-08 04:15:03,710:root:INFO - Started
+2023-08-08 04:15:26,765:root:INFO - File Name :- CLIENT.ORCA.BP
+2023-08-08 04:15:26,765:root:INFO - File encoding: Windows-1252, condifence :0.73
+2023-08-08 04:15:26,821:root:INFO - Input file read Successfully :- Rows : 4584 | Columns : 36
+2023-08-08 04:15:26,822:root:INFO - --------------------------------------------------
+2023-08-08 04:15:26,822:root:INFO - Processing column 21
+2023-08-08 04:15:26,855:root:INFO - API input dictionary generated
+2023-08-08 04:15:26,857:root:INFO - Tokenizing Chunk 1
+2023-08-08 04:15:27,589:root:INFO - Token data generated
+2023-08-08 04:15:27,589:root:INFO - Tokenizing Chunk 2
+2023-08-08 04:15:28,198:root:INFO - Token data generated
+2023-08-08 04:15:28,213:root:INFO - --------------------------------------------------
+2023-08-08 04:15:28,213:root:INFO - Processing column 22
+2023-08-08 04:15:28,248:root:INFO - API input dictionary generated
+2023-08-08 04:15:28,252:root:INFO - Tokenizing Chunk 1
+2023-08-08 04:15:28,965:root:INFO - Token data generated
+2023-08-08 04:15:29,006:root:INFO - start & end size match
+2023-08-08 04:15:29,096:root:INFO - Output Data generated successfully :- Rows : 4584 | Columns : 36
+2023-08-08 04:15:29,097:root:INFO - Completed
+2023-08-08 04:15:29,097:root:INFO - --------------------------------------------------
+2023-08-08 04:15:29,097:root:INFO - --------------------------------------------------
+2023-08-08 04:15:29,097:root:INFO - Run completed
