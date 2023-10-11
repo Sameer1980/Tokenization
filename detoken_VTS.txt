@@ -1,0 +1,352 @@
+
+import logging
+import numpy as np
+import os
+import pandas as pd
+import pyodbc
+import requests
+import threading
+import warnings;
+warnings.simplefilter('ignore')
+import yaml
+import csv
+import re
+from datetime import datetime
+import shutil
+
+# Parameter info
+credentials = yaml.safe_load(open('config/detoken_VTS_secrets.yaml'))
+offset_by =50000
+
+
+#creating datetime variables
+now = datetime.now()
+dt_str= now.strftime("%Y-%m-%d")
+dt_string=re.sub('[^A-Za-z0-9]+', '', dt_str)
+now = datetime.now()
+now=now.strftime("%Y-%m-%d %H:%M:%S")
+
+#reading old output info
+csvfile=open('config/datetime.csv','r', newline='')
+obj=csv.reader(csvfile)
+arr=[]
+for row in obj:
+    arr.append(row)
+start_d=arr[-1][0]
+print(start_d)
+
+env='dev'
+
+# log and output directory creation
+if os.path.exists(os.getcwd() + '/logs') is False:
+    os.mkdir(os.getcwd() + '/logs')
+
+if os.path.exists(os.getcwd() + '/output_files') is False:
+    os.mkdir(os.getcwd() + '/output_files')
+
+log_path = os.getcwd() + '/logs'
+output_path = os.path.join(os.getcwd(), 'output_files')
+
+archive_path = os.path.join(output_path, 'archive')
+filelist=[]
+files = os.listdir( output_path )
+for filename in files:
+    filelist.append(filename)
+    fullpath = os.path.join(output_path, filename)
+    shutil.move(fullpath, archive_path)
+
+FORMAT = '%(asctime)s:%(name)s:%(levelname)s - %(message)s'  # format to save errors, info etc., in log file
+logging.basicConfig(filename=log_path + "/data_detoken_compare_{}.log".format(credentials['oracle-%s' % env]['table_name']), format=FORMAT,
+                    level=logging.INFO, filemode="w")
+logging.info("Started")
+res = dict()
+
+def token_data_col(df,col_names,token_group_template_detail,token_dtype_detail):
+    auto_json_data = df
+    # auto_json_data['tokengroup'] = (['CB01' for p in range(len(auto_json_data))])
+    # auto_json_data['tokentemplate'] = (['CBASCII01' for p in range(len(auto_json_data))])
+
+    auto_json_data['tokengroup'] = token_group_template_detail[0]
+    auto_json_data['tokentemplate'] = token_group_template_detail[1]
+
+    auto_json_data = auto_json_data[[col_names, 'tokengroup', 'tokentemplate']].dropna()
+    if token_dtype_detail == 'int':
+        auto_json_data[col_names] = auto_json_data[col_names].astype(str)
+
+    auto_json_data.rename(columns={col_names: 'token'}, inplace=True)
+    auto_json_data_dict = auto_json_data.to_json(orient='records')
+
+    return auto_json_data, auto_json_data_dict
+
+def chunker(seq, size):
+    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
+
+def token_generic(auto_json_dict_data):
+
+    bearer_header = {
+        "APP_ID": credentials['vts-expl']['APP_ID'],
+        "APP_KEY": credentials['vts-expl']['APP_KEY'],
+        "apiVersion": str(credentials['vts-expl']['apiVersion'])
+    }
+
+    headers = {
+        'Content-Type': 'Application/json',
+        'Authorization': 'Bearer {}'.format(requests.post(credentials['vts-expl']['bearer-url'], headers=bearer_header).json()['access_token'])
+    }
+
+    payload = auto_json_dict_data
+    url = credentials['vts-expl']['detoken-url']
+    response = requests.post(url, headers=headers, data=payload, verify=False)
+    # data = response.json()
+    data = response.json(strict=False)
+    temp = pd.DataFrame(data)
+
+    return temp
+
+token_group_template = {val:[credentials['sql-%s' % env]['tokengroup'][ind],credentials['sql-%s' % env]['tokentemplate'][ind]] for ind,val in enumerate(credentials['sql-%s' % env]['cols'])}
+token_dtype = {val:credentials['sql-%s' % env]['dtype'][ind] for ind,val in enumerate(credentials['sql-%s' % env]['cols'])}
+
+def get_sql_data(i):
+    server = credentials['sql-dev']['server']
+    database = credentials['sql-dev']['database']
+    username = credentials['sql-dev']['login']
+    password = credentials['sql-dev']['pwd']
+    driver = '{ODBC Driver 17 for SQL Server}'
+    try:
+        cnxn = pyodbc.connect(
+            'DRIVER=' + driver + ';SERVER=' + server + ';PORT=1433;UID=' + username + ';PWD=' + password + ';DATABASE=' + database+ ';Encrypt=yes;TrustServerCertificate=yes')
+    except Exception as e:
+        logging.error("Error :-")
+        logging.error(e)
+        print(e)
+        raise
+    logging.info("Reading SQL Data")
+    logging.info("Table Name :- {}".format(credentials['sql-%s' % env]['table_name']))
+    #custom start date: credentials['sql-%s' % env]['start_date']
+    # custom end date: credentials['sql-%s' % env]['end_date']
+    # last run date: start_d
+    # Datetime right now: now
+    # sql_query = """SELECT * FROM {} where {} between '{}' and '{}' order by {}""".format(
+    #     credentials['sql-%s' % env]['table_name'], credentials['sql-%s' % env]['sort_by_column'],
+    #     start_d,now, credentials['sql-%s' % env]['order_by_column'])
+    sql_query = """SELECT * FROM {} order by {}""".format(
+        credentials['sql-%s' % env]['table_name'],
+        credentials['sql-%s' % env]['order_by_column'])
+    print(sql_query)
+    #sql_query = 'select DISTINCT DR_LIC_N,ROWID_OBJECT,SSN from C_BO_031_BP_IDENT_HIST'
+    if 'order by' in sql_query:
+        sql_query = sql_query + ' OFFSET {} ROWS FETCH NEXT {} ROWS ONLY'.format(offset_count, offset_by)
+    else:
+        logging.error("order by clause missing")
+        print("order by clause missing")
+        print("Failed")
+        raise
+
+    try:
+        sql_df = pd.read_sql(sql_query, con=cnxn)
+    except Exception as e:
+        print("Error in sql query..Please review")
+        logging.error("Error :-")
+        logging.error(e)
+        raise
+    finally:
+        cnxn.close()
+
+    res['sql_df'] = sql_df
+    return sql_df
+
+
+x = 1
+for num in range(1):
+    output = pd.DataFrame()
+
+    stats_table = pd.DataFrame(columns=['Column_Name', 'Matched', 'Unmatched'])
+    unmatched_records_oracle_final = pd.DataFrame()
+    unmatched_records_sql_final = pd.DataFrame()
+
+    offset_count = 0
+    offset_batch = 1
+    offset_process = True
+    while offset_process:
+        unmatched_records_oracle = pd.DataFrame()
+        unmatched_records_sql = pd.DataFrame()
+        print("-" * 30)
+        print("Processing Batch {}".format(offset_batch))
+        print("Reading Database")
+
+        logging.info("-" * 30)
+        logging.info("Processing Batch {}".format(offset_batch))
+
+        if __name__ == '__main__':
+            t1 = threading.Thread(target=get_sql_data, args=(num,))
+            t1.start()
+            t1.join()
+
+        sql_data = pd.DataFrame(res['sql_df'])
+        print("Reading Database Completed")
+        if sql_data.shape[0]==0 and (offset_count==0) and (offset_batch ==1):
+            #sql_data.to_excel('./detoken_{}.xlsx'.format(dt_str), index=False, header=False)
+            csvfile = open('datetime.csv', 'a', newline='')
+            obj = csv.writer(csvfile)
+            obj.writerow([now, sql_data.shape[0]])
+            csvfile.close()
+            print("Zero records in range")
+            df=pd.DataFrame()
+            filename = r'detoken_{}.csv.tkn'.format(dt_string)
+            df.to_csv(r'detoken_{}.csv.tkn'.format(dt_string), index=False, header=['actual_data', 'tokenised_data'],
+                      sep='\x01', quoting=csv.QUOTE_NONE)
+            print("token file output Completed")
+            dff = pd.DataFrame({
+                'filename': [filename],
+                'records': [df.shape[0]]})
+            dff.to_csv(r'trigger_{}.end'.format(dt_string), index=False, quoting=csv.QUOTE_NONE)
+            print("Trigger file output Completed")
+
+            exit()
+
+        df3 = sql_data
+        if df3.shape[0] > 0:
+            column_order = df3.columns
+            for col_name in credentials['sql-%s' % env]['cols']:
+                #df3[col_name]=df3[col_name].str.rstrip()
+                auto_json, auto_json_dict = token_data_col(df3, col_name,token_group_template[col_name],token_dtype[col_name])
+                result = []
+
+                auto_json_unique = auto_json.drop_duplicates(subset=['token'])
+
+                if auto_json.shape[0] > 0:
+                    for i in chunker(auto_json_unique, 1000):
+                        i = i.to_json(orient='records')
+                        array = i
+                        auto_json_dict = array
+                        result.append(token_generic(auto_json_dict))
+
+                    result = pd.concat(result)
+                    result = result.reset_index(drop=True).rename(columns={'data': str(col_name) + '_detoken'})
+                    result.drop(columns={'status'}, inplace=True)
+
+                    result_join = auto_json_unique.reset_index().join(result).set_index('index')
+
+                    auto_json[str(col_name) + '_detoken'] = auto_json['token'].map(
+                        result_join.set_index('token')[str(col_name) + '_detoken'])
+
+                    df3 = df3.join(auto_json[str(col_name) + '_detoken'].to_frame())
+
+                else:
+                    df3[col_name + '_detoken'] = np.nan
+
+            for col_name in credentials['sql-dev']['cols']:
+                print(col_name + ' not null ' + '{}'.format(
+                    df3[~df3[col_name].isna()].shape[0]) + ' | ' + col_name + ' not null ' + '{}'.format(
+                    df3[~df3[col_name + '_detoken'].isna()].shape[0])
+                      + ' | {}'.format(
+                    df3[~df3[col_name].isna()].shape[0] == df3[~df3[col_name + '_detoken'].isna()].shape[0]))
+
+
+            df3.drop(columns={'tokengroup', 'tokentemplate'}, inplace=True)
+            df2=df3.drop_duplicates(subset=credentials['sql-%s' % env]['cols'])
+
+            cols=[]
+            cols1 = []
+
+            for col_name in credentials['sql-%s' % env]['cols']:
+                cols.append(col_name)
+            for col_name in credentials['sql-%s' % env]['cols']:
+                cols1.append(col_name + '_detoken')
+                cols.append(col_name + '_detoken')
+            for x in iter(credentials['sql-%s' % env]['order_by_column'].split(',')):
+                cols.append(x.strip())
+            df2=df2[cols[0:5]]
+
+            output=output.append(df2)
+
+            print("de-tokenising complete")
+            offset_batch += 1
+            offset_count += offset_by
+        if df3.shape[0] < offset_by:
+            offset_process = False
+
+    else:
+        offset_process = False
+
+    df4 = output[[cols[0],cols[2]]]
+    df5 = output[[cols[1],cols[3]]]
+
+    df4.drop_duplicates(inplace=True)
+    df5.drop_duplicates(inplace=True)
+
+    df5=df5.dropna()
+    print('unique DLN records: {}'.format(df5.shape[0]))
+    df4.dropna()
+    print('unique SSN records: {}'.format(df4.shape[0]))
+    try:
+        common_ssn = pd.read_csv('config/tokens.csv',dtype={'SSN': object})
+    except Exception as e:
+        common_ssn=pd.DataFrame(columns=['SSN'])
+        print(e)
+    print('logged records in ssn: {}'.format(common_ssn.shape[0]))
+    left_ssn = pd.merge(df4, common_ssn, how="left", on=['SSN'], indicator=True)
+    output_ssn = left_ssn[left_ssn['_merge'] == 'left_only']
+    output_ssn.drop('_merge', axis=1, inplace=True)
+    #output_ssn.drop('SSN_detoken', axis=1, inplace=True)
+    output_ssn=output_ssn.dropna()
+    # output_ssn.drop(columns='SSN_detoken',inplace=True)
+    #output_ssn['datetime_store']=pd.Timestamp(now)
+    print('Writting rows to tokens: {}'.format(output_ssn.shape[0]))
+    output_ssn['SSN'].to_csv('config/tokens.csv',header=False,index=False,mode='a',quoting=csv.QUOTE_NONNUMERIC)
+
+    try:
+        common_dln = pd.read_csv('config/tokens_dln.csv',dtype={'DR_LIC_N': object})
+    except Exception as e:
+        common_dln=pd.DataFrame(columns=['DR_LIC_N'])
+        print(e)
+    print('logged records in DLN: {}'.format(common_dln.shape[0]))
+    #output_dln = pd.concat([common_dln, df5]).drop_duplicates(keep=False)
+    left = pd.merge(df5, common_dln, how="left", on=['DR_LIC_N'], indicator=True)
+    output_dln=left[left['_merge']=='left_only']
+    output_dln.drop('_merge', axis=1, inplace=True)
+    #output_dln.drop('DR_LIC_N_detoken',axis=1,inplace=True)
+    output_dln = output_dln.dropna()
+    # output_dln.drop(columns='DR_LIC_N_detoken',inplace=True)
+    #output_dln['datetime_store']=pd.Timestamp(now)
+    print('Writing rows to tokens_dln: {}'.format(output_dln.shape[0]))
+    output_dln['DR_LIC_N'].to_csv('config/tokens_dln.csv',header=False,index=False,mode='a',quoting=csv.QUOTE_NONNUMERIC,escapechar='')
+
+    df4 = output_ssn
+    df5 = output_dln
+
+    df4 = df4.rename(columns={'SSN': 'token','SSN_detoken':'detoken'})
+    df5 = df5.rename(columns={'DR_LIC_N': 'token', 'DR_LIC_N_detoken': 'detoken'})
+
+    #meling dataframe into specified format
+    s1 = df4.assign(a=np.arange(len(df4))).set_index('a', append=True)
+    s2 = df5.assign(a=np.arange(len(df5))).set_index('a', append=True)
+    df = (pd.concat([s1, s2], keys=('t', 'dt'))
+          .sort_index(kind='merge', level=2)
+          .reset_index(level=2, drop=True)
+          .swaplevel(0, 1))
+    df = df.apply(lambda x: pd.Series(x.dropna().values))
+    df = df.apply(lambda x: pd.Series(x.dropna().values)).fillna('')
+    df=df[df.columns[::-1]]
+
+    #outputing token file
+    tkn_filename = r'detoken_{}.csv.tkn'.format(dt_string)
+    filepath_tkn = os.path.join(output_path, tkn_filename)
+    df.to_csv(r'{}'.format(filepath_tkn), index=False, header=['actual_data','tokenised_data'],sep='\x01',quoting=csv.QUOTE_NONE)
+    logging.info("Completed")
+    print("Token file output Completed")
+
+#updating datetime csv
+csvfile=open('config/datetime.csv','a', newline='')
+obj=csv.writer(csvfile)
+details=[now,df.shape[0]]
+obj.writerow([now,df.shape[0]])
+
+#outputting trigger file
+dff= pd.DataFrame({
+    'filename': [tkn_filename],
+    'records': [df.shape[0]]})
+end_filename='trigger_{}.end'.format(dt_string)
+filepath_end = os.path.join(output_path, end_filename)
+dff.to_csv(r'{}'.format(filepath_end), index=False,quoting=csv.QUOTE_NONE)
+print("Trigger file output Completed")
